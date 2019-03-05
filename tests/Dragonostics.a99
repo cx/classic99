@@ -1,0 +1,1026 @@
+**************
+* Dragon's Lair Diagnostics code
+* this assumes the main cartridge has started up all
+* the important stuff and is ready to go
+* Bank in and branch to >6000 - never returns.
+**************
+
+CARTPAGE EQU >6004
+
+    DEF MAIN
+
+	COPY "D:\work\ti\dragonslair\code\CommonCode.a99"
+    
+* no cart header, don't need it. We have a GROM boot.
+    AORG >6000
+
+MAIN
+    LIMI 0
+    LWPI >8300
+    
+* set up sound chip
+    LI R0,>9FBF     * mute all channels
+    MOVB R0,@SOUND
+    SWPB R0
+    MOVB R0,@SOUND
+    LI R0,>DFFF
+    MOVB R0,@SOUND
+    SWPB R0
+    MOVB R0,@SOUND
+    
+* skip over all the subroutines...    
+    B @GAMESTART
+   
+* VMBWP via a page - corrupts scratchpad at >8320	
+* R0 - VDP address (with >4000 set)
+* R1 - src address (register saved but incremented)
+* R2 - count
+* R3 - video page to copy from (as in ROM LAYOUT.txt)
+VMBWP
+	MOV R11,@SAVE2 		* frees R11
+	BL @VDPWTA	   		* set VDP address - frees R0
+* Add in offset
+	AI R3,VIDEOFFSET
+* copy the code into scratchpad
+	LI R11,VMBWPA  		* R11 is free to reuse
+	LI R0,>8320	   		* R0 is free to reuse
+VMBCP1	
+	MOV *R11+,*R0+
+	CI R11,VMBWPE
+	JNE VMBCP1
+* Get the banking info ready (convert index into page and data)
+	MOV r3,r0	   		* r0 is free to reuse
+	SRL R0,4
+	ANDI R0,>0F00
+	ANDI R3,>0FFF
+	SLA R3,1
+	AI R3,>6000
+* Do the actual copy
+	BL @>8320
+* and back to caller	
+	MOV @SAVE2,R11
+	B *R11
+	
+VMBWPA
+* Entry here at >8320. R3 has page address, R0 has page data in MSB
+	MOV R0,*R3
+LPA2
+	MOVB *R1+,@>8C00
+	DEC R2
+	JNE LPA2
+	CLR @CARTPAGE
+	B *R11
+VMBWPE
+
+* Write address or register
+VDPWTA
+    SWPB R0
+    MOVB R0,@>8C02
+    SWPB R0
+    MOVB R0,@>8C02
+    B *R11  
+
+* clean up scratchpad so we can safely reboot
+REBOOT
+* reset F18A
+	BL @RESTF18
+	BL @LOCKF18
+* wipe scratchpad	
+	LI R0,>8304
+	LI R1,252
+RBLP1
+	CLR *R0+
+	DECT R1
+	JNE RBLP1
+* soft reset of console	
+	BLWP @>0000
+	
+**
+* RESTF18 - Reset the GPU on the F18 (no harm if not F18, 
+* but expect registers to be messed up)	
+* We don't use palettes, so removed that code
+RESTF18
+	MOV R11,@SAVE2
+	
+* stop the GPU and then Reset (no harm if it's not F18)
+	LI R0,>B800				* stop the GPU -- this does stop the GPU
+	BL @VDPWTA				* GPU will stop long before we're done
+
+	MOV @SAVE2,R11
+	B *R11
+	
+* lock F18 if it's still unlocked (pre 1.6)
+LOCKF18
+	MOV R11,@SAVE2
+
+* reset the F18A to defaults (except palette, requires 1.6)	
+	LI R0,>B280				* VR2/50, value 10000000
+	BL @VDPWTA				* reset and lock F18A, or corrupt R2
+	
+	LI R0,>B900       		* VR1/57, value 00000000
+	BL @VDPWTA          	* write once (corrupts VDPR1)
+	
+	MOV @SAVE2,R11
+	B *R11	
+	
+**********************
+* More subroutines! so unorganized!
+**********************
+
+* VSMW - VDP Single Byte Multiple Write
+* VDP - R0 (with >4000 set)
+* Byte- R1 MSB
+* Cnt - R2
+VSMW
+	MOV R11,@SAVE2
+	BL @VDPWTA	   		* set VDP address - frees R0
+VSMW1
+	MOVB R1,@VDPWD
+	DEC R2
+	JNE VSMW1
+	MOV @SAVE2,R11
+	B *R11
+
+* Fast joystick read with fire - kills R12 and R10, uses JOYDAT
+* blocking, too, there's a NOP
+* also checks for QUIT
+JOYFAST
+* check QUIT (same code as console ROM)
+	LI 12,>0024 		* Load CRU
+	LDCR @>0012,3
+	SRC 12,7			* delay
+	LI 12,>0006
+	STCR R10,8 			* Fetch CRU
+	CZC @QUITK,R10 		* QUIT key?
+	JNE MENUKY
+	B @REBOOT			* reboot if yes
+MENUKY
+* read joystick
+	li r12,>0024
+	li r10,>0600
+	ldcr r10,3
+	NOP					* delay, this plus the SETO
+	SETO JOYDAT			* zero it out (active low until after we INV below)
+	li r12,>0006
+	stcr JOYDAT,8
+	INV JOYDAT			* make sure '1' bits are active
+	JEQ TRYKEYB
+	B *R11
+* No joystick input, so we'll try keyboard instead (ESDX, period)	
+* SX and period are on row 1, ED are on row 2
+TRYKEYB	
+	LI R10,>0100
+	LI R12,>0024
+	LDCR R10,3			* select row 1
+	SRC 12,7			* delay
+	LI R12,>0006		* first bit (period)
+	tb 0
+	JEQ KEYNP
+	LI JOYDAT,JOYFIRE
+	B *R11
+KEYNP
+	TB 5
+	JEQ KEYNS
+	LI JOYDAT,JOYLEFT
+	B *R11
+KEYNS
+	TB 7
+	JEQ KEYNX
+	LI JOYDAT,JOYDOWN
+	B *R11
+KEYNX
+	LI R10,>0200
+	LI R12,>0024
+	LDCR R10,3			* select row 2
+	SRC 12,7			* delay
+	LI R12,>0010		* first bit (D)
+	TB 0
+	JEQ KEYND
+	LI JOYDAT,JOYRIGHT
+	B *R11
+KEYND
+	TB 1
+	JEQ KEYNONOTHING
+	LI JOYDAT,JOYUP
+KEYNONOTHING	
+	B *R11
+	
+* set the color table for video to black
+BLACKVID
+	MOV R11,@SAVE3
+	
+	LI R0,>6000
+	CLR R1
+	LI R2,768
+	BL @VSMW
+	
+	LI R0,>6800
+	LI R2,1536
+	BL @VSMW
+	
+	LI R0,>7000
+	LI R2,768
+	BL @VSMW
+	
+	MOV @SAVE3,R11
+	B *R11
+
+* same as SHOWANDPAUSE below without the blackvid call, for the options screen
+SHOWANDPAUSE2
+	MOV R11,@SAVE
+	MOV R0,R9		* src page
+	MOV R1,R13
+	JMP SAPCONT
+	
+* shows a frame from R0 and waits for R1 frames
+* also kills R9,R10,R12,R13,JOYDAT....
+* must be possible to abort with fire button (but not HOLDING fire)
+* There's actually no PAUSE in the Dragonostics!
+SHOWANDPAUSE
+	MOV R11,@SAVE
+	MOV R0,R9		* src page
+	MOV R1,R13
+	
+* first black the color table to avoid corruption
+	BL @BLACKVID
+
+SAPCONT	
+* now load the new image
+	LI R0,>4000		* pattern
+	LI R1,CFGPAT
+	LI R2,768
+	MOV R9,R3
+	BL @VMBWP
+	
+	LI R0,>4800
+	LI R2,1536
+	MOV R9,R3
+	BL @VMBWP
+	
+	LI R0,>5000
+	LI R2,768
+	MOV R9,R3
+	BL @VMBWP
+	
+	LI R0,>6000		* color
+	LI R2,768
+	MOV R9,R3
+	BL @VMBWP
+	
+	LI R0,>6800
+	LI R2,1536
+	MOV R9,R3
+	BL @VMBWP
+	
+	LI R0,>7000
+	LI R2,768
+	MOV R9,R3
+	BL @VMBWP
+
+* No delay, haha!
+	MOV @SAVE,R11
+	B *R11
+	
+* but, we do have a separate delay function...
+* R1 is countdown, fire does NOT abort, no QUIT either
+* R12 is corrupted and VDP status is obviously read (into R12 if you care)
+DELAY	
+	MOVB @VDPST,R12			* clear VDP status
+
+DELLP
+	CLR R12					* set CRU base (doesn't need to be in loop, but provides delay)
+	TB 2 					* check VDP interrupt input
+	JEQ DELLP				* if not set, keep waiting
+	MOVB @VDPST,R12	  		* reset status
+	DEC R1
+	JNE DELLP
+
+* all done
+	B *R11	
+	
+showscore
+* show score (kind of BCD-ish, each byte is 0-99)
+* kills r0, r1, and VDP address
+* digits in segment 3 are characters 167 (A7) on top and add 32 for bottom
+* space is 177 (B1)
+* score starts at >1AA7
+* lives is at >1AB7
+*
+	LI R0,>A75A
+	MOVB R0,@VDPWA
+	SWPB R0
+	MOVB R0,@VDPWA
+	CLR R1			* have to just once
+	
+	MOVB @scr1,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+	
+	MOVB @scr2,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+	
+	MOVB @scr3,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+	
+	LI R0,>C75A			* second row
+	MOVB R0,@VDPWA
+	SWPB R0
+	MOVB R0,@VDPWA
+	
+	MOVB @scr1,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	AI R0,>2020
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+	
+	MOVB @scr2,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	AI R0,>2020
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+	
+	MOVB @scr3,@>8303	* R1 LSB
+	SLA R1,1		* multiply by 2
+	MOV @BCDLOOKUP(R1),R0
+	AI R0,>2020
+	MOVB R0,@VDPWD
+	SWPB R0
+	MOVB R0,@VDPWD
+
+	B *R11
+	
+showlives
+* show lives (0-5)
+	LI R0,>B75A
+	MOVB R0,@VDPWA
+	SWPB R0
+	MOVB R0,@VDPWA
+	
+	MOVB @lives,R1
+	AI R1,>A700
+	MOVB R1,@VDPWD
+	
+	LI R0,>D75A
+	MOVB R0,@VDPWA
+	SWPB R0
+	MOVB R0,@VDPWA
+	
+	AI R1,>2000
+	MOVB R1,@VDPWD
+
+	B *R11
+
+*********************************************************
+* Actual diagnostic code starting up here (post-init)
+*********************************************************
+GAMESTART
+
+* We have a simple set of basic tests with a screen for each
+	BL @BLACKVID
+	
+* if the F18A is enabled, stop it
+	BL @RESTF18	
+* that may have corrupted VR0, so restore that
+	LI R0,>8002
+	BL @VDPWTA
+
+***************************************************
+* diag 1 - RAM
+***************************************************
+	LI R0,>2a52
+	BL @SHOWANDPAUSE
+
+* keep track of address in score digits (as decimal, sorry)
+* on failure, show >2a59 and wait for QUIT
+
+* check scratchpad RAM from >8320 to SAVE3, show 0-255
+* just a simple incrementing value test, not all inclusive
+	clr @lives
+	li r0,32		* correct start address in score
+	mov r0,@scr2
+	
+	li r2,>0100		* increment byte
+	li r3,100*256	* compare byte
+	li r4,>8320		* first address
+	li r5,>1234		* first value
+d1lp1
+	mov r5,*r4+		* fill scratchpad
+	inc r5
+	ci r4,SAVE3		* stop at address of SAVE3
+	jl d1lp1
+
+	li r4,>8320
+	li r5,>1234
+d1lp2
+	c r5,*r4+		* compare it
+	jne d1fail
+	inc r5
+	
+	ab r2,@scr3
+	ab r2,@scr3		* we're adding two in this case
+	cb @scr3,r3		* the compare is still okay
+	jl d1n1
+	
+	swpb r2
+	movb r2,@scr3	* zero it
+	swpb r2
+	ab r2,@scr2		* only need to do one carry
+d1n1	
+	bl @showscore
+	
+	ci r4,SAVE3
+	jl d1lp2
+	
+* then check VDP from >3800 to >3FFF
+* VDP from 10000-12047
+	movb r2,@scr1	* flag a higher address
+	swpb r2
+	movb r2,@scr2
+	movb r2,@scr3
+	swpb r2
+	
+	li r0,>7800		* first address (write)
+	bl @vdpwta
+	li r5,>5700		* first value
+	li r6,>0800		* countdown
+d1lp3
+	movb r5,@VDPWD
+	ai r5,>0100
+	dec r6
+	jne d1lp3
+	
+	li r7,>3800		* first address (read)
+	li r5,>5700		* first value
+	li r6,>0800		* countdown
+d1lp4
+	mov r7,r0
+	bl @vdpwta
+	inc r7
+	cb @VDPRD,r5
+	jne d1fail
+	ai r5,>0100
+	
+	ab r2,@scr3
+	cb @scr3,r3
+	jl d1n2
+	
+	movb @>8305,@scr3	* zero it (r2 lsb)
+	ab r2,@scr2		* only need to do one carry
+d1n2
+	bl @showscore
+	
+	dec r6
+	jne d1lp4
+	jmp d1ok
+	
+d1fail
+	LI R0,>2a59
+	BL @SHOWANDPAUSE2
+d1flp
+	bl @joyfast
+	jmp d1flp
+
+d1ok	
+
+***************************************************
+* diag 2 - ROM
+***************************************************
+	LI R0,>2a53
+	BL @SHOWANDPAUSE2
+	
+* copy routine to scratchpad to checksum one page
+* of ROM, then check entire cart. Display current page in score.
+* On failure, show >2a5a and wait for QUIT
+
+* copy the scratchpad code over to >8320
+	LI R0,d2chkstart
+	LI R1,>8320
+d2lp1
+	MOV *R0+,*R1+
+	ci R0,d2chkend
+	JNE d2lp1
+	
+* start at page 0, count separately in score
+	clr r6
+	clr @lives		* and scr1
+	clr @scr2		* and scr3
+	
+d2lp2
+	bl @showscore
+	
+	mov r6,r0		* prepare the checksum
+	bl @>8320		* do it
+	c r4,r5			* and test the result
+	jne d2fail		* they must be equal!
+	
+	inc r6			* next page
+	ci r6,>4000		* at 128MB? (8k pages)
+	jhe d2ok		* must be done!!
+	
+* increment the score digits
+	li r0,>0100		* byte increment
+	li r1,100*256	* byte 100
+	ab r0,@scr3		* next page for score
+	cb @scr3,r1		* is it time to wrap?
+	jl d2lp2		* nope
+	movb @>8301,@scr3	* zero it (r0 lsb)
+	ab r0,@scr2		* next 100s
+	cb @scr2,r1		* this one can wrap twice
+	jl d2lp2
+	movb @>8301,@scr2	* zero it (r0 lsb)
+	ab r0,@scr1		* next 10000s
+	jmp d2lp2		* this one can't wrap
+	
+* this code is copied to scratchpad and executed there
+* page in R0, messes R3, return in R4, compare in R5
+d2chkstart
+	MOV R0,R4		* start checksum with page index
+	MOV r0,r3		* split page into
+	SRL R0,4		* .. data
+	ANDI R0,>0F00	* .. limited range
+	ANDI R3,>0FFF	* .. and address
+	SLA R3,1		* .. once shifted
+	AI R3,>6000		* .. and added in
+	MOV R0,*R3		* do the page switch
+	
+	LI R0,>6000		* prepare the loop
+d2chl1
+	A *R0+,R4		* checksumming words
+	A *R0+,R4		* checksumming words
+	A *R0+,R4		* checksumming words
+	A *R0+,R4		* checksumming words
+	CI R0,>6100		* Just 256 bytes worth (for performance's sake)
+	JNE d2chl1		* loop till there
+	
+	MOV @>7FFE,R5	* read out the correct value
+	
+	CLR @CARTPAGE	* go back to the code page
+	B *R11			* and back to caller
+d2chkend	
+	
+d2fail
+	LI R0,>2a5a
+	BL @SHOWANDPAUSE2
+d2failp
+	BL @JOYFAST
+	jmp d2failp
+	
+d2ok
+
+***************************************************
+* diag 3 - 9900
+***************************************************
+	LI R0,>2a54
+	BL @SHOWANDPAUSE2
+
+* CPU test from 990 mini - TI990 Handbook, 6-11 (page 218)
+* On failure, show >2a5b and wait for QUIT
+* WP at >8300
+START
+          LI   R8,>7FFF
+          INCT R8
+          JNO  ERROR1         * stop if no overflow
+          MOV  R0,R1
+          MOV  R8,R0
+          SRA  R8,5
+          SRL  R8,1
+          SRA  R8,0
+          MOV  R1,R0          * restore R0
+          CI   R8,>3F00
+          JNE  ERROR1         * stop if different from the value expected
+          SETO R4
+          ANDI R4,>5555
+          BL   @ERR1          * this should clear R4, or stop if it fails
+          ORI  R4,>5555
+          BL   @ERR1
+
+		  MOVB @VDPST,R1	  * before enabling interrupts, make sure we clear them
+D3WLP
+		  CLR R12
+		  TB 2				  * wait for another one so we know it's safe
+		  JEQ D3WLP
+		  MOVB @VDPST,R1	  * clear them again, now it's safe for one frame of time
+	  
+          LIMI >0001          * effectively sets least significant bit in ST
+          BLWP @INDIR1        * jump indirect to CONT1
+
+* should be called with R4 == >5555
+
+ERR1      ORI  R4,>AAAA
+          INC  R4
+          JNE  ERROR1         * stop if R4 != 0
+          B    *R11
+
+* continue on...
+
+CONT1     STST R11
+          SRA  R11,1          * test LSBit in ST
+          JNC  ERROR1         * stop if not set
+          CLR  R15            * -> clear ST (ints are cleared on RTWP)
+          LI   R14,CONT2      * actual jump address
+          RTWP
+
+INDIR1    DATA >8320         * BLWP vector
+          DATA CONT1
+
+* continue on...  This gets tricky -) .
+
+CONT2     STST R7
+          MOV  R7,R1
+          JNE  ERROR1         * stop if ST not clear
+
+LOOP1     MOV  R1,R2
+          SRC  R2,5
+          SWPB R2             * effectively rotate R2 3 bits left
+          MOV  R2,R11
+          ABS  R11
+
+          MOV  R2,R3
+          SLA  R3,1           * test R2 sign bit
+          JNC  CONT3          * start if R2 is positive
+
+          INV  R11            * R11 = ~R11
+          C    R11,R2         * so R11 = R2-1
+          JH   ERROR1         * stop the machine if R11>R2
+          JLT  OK1            * huh ??? what if R2 == >8000 ? This must be a bug !
+
+ERROR1    b @d3fail         * stop everything
+
+OK1       C    R2,R11
+          JL   ERROR2         * we still have R11 = R2-1...
+          INCT R11
+          DEC  R11            * now R11 == R2
+
+* we jump here when R2 >= 0
+
+CONT3     C    R11,R2
+          JNE  ERROR2
+
+          MOV  R1,R3
+          A    R2,R3
+          MOV  R1,R4
+          NEG  R4
+          S    R2,R4
+          NEG  R4
+          CB   R3,R4           * we should have R3==R4
+          JH   ERROR2          * stop if logically higher
+          JLE  CONT4           * jump there if OK
+          JMP  ERROR2          * stop if arithmetically greater
+
+CONT4     CB   @>8307,@>8309   * compare R3 MSB and R4 MSB
+          JNE  ERROR2          * stop if different
+          COC  R4,R3           * (R3 & R4) == R3 ?
+          JNE  ERROR2
+          INV  R4
+          CZC  R4,R3           * (R3 & ~R4) == R3 ?
+          JNE  ERROR2
+          INV  R4
+          SB   R3,R4           * result 0 in R4 MSB
+          JLT  ERROR2
+          JNE  ERROR2
+          SB   @>8307,@>8309   * subtract LSB
+          JNE  ERROR2
+          MOVB R2,R4           * move R2 MSB
+          MOVB @>8305,@>8309   * move R2 LSB
+          AB   @>8303,@>8309   * add R1 LSB
+          JNC  CONT5
+          AI   R4,>0100       * adjust carry if needed
+CONT5     AB   R1,R4           * add R1 MSB
+          C    R3,R4           * we should still have R3 = R1+R2, too...
+          JNE  ERROR2
+          INC  R3
+          INC  R3
+          C    R4,R3
+          JEQ  ERROR2
+          JGT  ERROR2
+          DECT R3
+          C    R3,R4
+          JNE  ERROR2
+          MOV  R3,R5
+          MOV  R5,R6
+          MOV  R5,R7
+          SWPB R7             * swap bytes (8-bit rotate)
+          SRL  R5,8
+          SLA  R6,8
+          SOC  R5,R6          * swap bytes with another method
+          C    R6,R7
+          JNE  ERROR2
+          SRC  R6,8           * swap bytes again
+          C    R6,R3          * should equate the original value
+          JNE  ERROR2
+
+* now, multiply R1 and R2 with custom code, then check MPY gives the same result
+
+          LI   R10,>0010     * 16 bits to test
+          CLR  R11
+          CLR  R8
+          CLR  R7
+          MOV  R2,R6
+          MOV  R1,R5
+
+LOOP2     SRA  R5,1           * if R5 LSB is set
+          JNC  CONT6
+
+          A    R6,R11         * add R7R6 to R8R11
+          JNC  AR7R8
+          INC  R8
+AR7R8     A    R7,R8
+
+CONT6     SLA  R7,1           * shift R7R6
+          SLA  R6,1
+          JOC  INCR7
+          JMP  DECR10
+INCR7     INC  R7
+
+DECR10    DEC  R10            * loop
+          JNE  LOOP2
+
+          MOV  R1,R3
+          MPY  @>8304,R3     * = MPY R2,R3
+          C    R3,R8          * compare MSWord
+          JNE  ERROR2
+          C    R4,R11         * compare LSWord
+          JNE  ERROR2
+
+* now, test DIVide
+
+          C    R1,R2
+          JHE  DIV2
+          A    R1,R4          * if R1 < R2, add R1 to MSW (R4)
+          JNC  DIV1
+SUBR4     S    R1,R4          * if carry, revert to normal method
+          JMP  DIV2           * (otherwise, there might be an overflow when executing DIV)
+DIV1      DIV  R2,R3
+          X    @SUBR4         * = S R1,R4 (remainder should be R1, and is fixed to be 0)
+          JMP  CHKREM
+
+DIV2      DIV  @>8304,R3     * compute R3R4 / R2
+          MOV  R4,R4          * test the remainder
+CHKREM    JNE  ERROR2         * should be 0
+
+* now test parity ST bit
+
+          MOVB R1,R6
+          LI   R7,>0008      * 8 bits to test
+          CLR  R8
+SLAR6     SLA  R6,1
+          JNC  DECR7
+          INC  R8             * count bits
+DECR7     DEC  R7
+          JGT  SLAR6          * loop if some bits left
+
+          SRC  R8,1           * test parity
+          JNC  ABR1R7
+
+          MOVB R1,R1          * should be odd parity
+          JOP  MOVR2R5
+ERROR2    b @d3fail
+
+ABR1R7    AB   R1,R7          * R7 == 0 from previous loop (remember ?)
+          JOP  ERROR2         * should be even parity
+
+MOVR2R5   MOV  R2,R5
+          SZC  R2,R5          * R5 = R5 & ~R2
+          JNE  ERROR2         * result should be 0
+          A    R2,R5          * hence R5 = R2
+          SZCB R2,R5          * R2 MSB & R5 MSB
+          JNE  ERROR2
+          SZCB @>8305,@>830B  * R2 LSB & R5 LSB
+          JNE  ERROR2
+          SETO R11            * R11 = >FFFF
+          SZC  R2,R11         * R11 = R11 & ~R2
+          JEQ  ERROR2         * obviously, R2 is assumed to be non-zero
+          SOCB R1,R5          * R5 should be 0 from previous computation.
+          SWPB R5
+          SOCB @>8303,R5     * bit-wise OR with R1 LSB
+          SRC  R5,8           * so R5 = R1
+          S    R1,R5
+          JNE  ERROR2
+
+          INC  R1             * increment R1
+          CI   R1,>FFC0
+          JH   MEMTEST        * if R1 > >FFC0, bail out
+
+          MOV  R1,R6
+          LI   R4,>0013
+          DIV  R4,R5          * effectively computes R6 / 19  (R5 is still 0, remember ?)
+          MOV  R6,R6          * test the remainder
+          JNE  EOLOOP1
+          AI   R1,>03E8      * add 1000 to R1 if R1 is multiple of 19
+EOLOOP1   B    @LOOP1         * and loop
+
+d3fail
+	LI R0,>2a5B
+	BL @SHOWANDPAUSE2
+d3failp
+	BL @JOYFAST
+	jmp d3failp
+
+* not memtest here, but that's the exit label...
+MEMTEST
+
+***************************************************
+* diag 4 - sound
+***************************************************
+	LI R0,>2a55
+	BL @SHOWANDPAUSE2
+
+* play a scale on each of the three channels
+* There is no failure detectable, so just continue after
+* note we play at the softer volume that we use
+	LI R0,>8000		* channel
+	LI R5,>9800		* volume
+
+d4lp2	
+	LI R2,SCALE		* scale table
+	LI R3,8			* 8 notes
+	
+d4lp
+	movb r5,@SOUND	* set volume
+	mov *r2+,r4		* get note
+	a r0,r4			* add channel
+	movb r4,@SOUND	* play note
+	swpb r4
+	movb r4,@SOUND
+	
+	li r1,30		* hold it
+	bl @delay
+		
+	dec r3			* next note
+	jne d4lp		* continue until done
+
+	mov r5,r4		* get volume
+	ori r4,>0f00	* make mute
+	movb r4,@SOUND	* and mute it
+	
+	ai r5,>2000		* next volume
+	ai r0,>2000		* next channel
+	ci r0,>e000
+	jl d4lp2		* loop until we reach the noise channel (not tested)
+
+***************************************************
+* diag 5 - display 0-9 on all digits 3 times
+***************************************************
+	LI R0,>2a56
+	BL @SHOWANDPAUSE2
+
+	li r8,4
+
+d5lp2	
+	dec r8
+	jeq d5done
+	clr @lives
+	clr @scr2
+	
+d5lp
+	BL @showscore
+	BL @showlives
+	
+	li r1,20
+	bl @delay
+	
+	li r0,>0100
+	ab r0,@lives
+	li r0,11*256		* note: NOT hex, just byte shifted
+	ab r0,@scr1
+	ab r0,@scr2
+	ab r0,@scr3
+	
+	mov @scr2,r0
+	ci r0,99*256+99
+	jle d5lp
+	jmp d5lp2
+	
+d5done
+
+***************************************************
+* diag 6 - keyboard
+***************************************************
+	LI R0,>2a57
+	BL @SHOWANDPAUSE2
+
+* for 15 seconds scan keyboard and joystick, and display
+* up/down/left/right/sword indicators as appropriate
+* There is no failure detectable, so just continue after
+	li r8,900		* frames to work for
+d6lp
+	CLR R12			* check interrupt inline
+	tb 2			* check VDP
+	jeq d6n0		* not yet
+	MOVB @VDPST,R0	* clear VDP
+	dec r8			* count down
+	JEQ d6done		* done
+	
+d6n0
+	BL @joyfast		* get the joystick bits
+
+	mov joydat,r0	* see what's set (only 1 at a time showable)
+	andi r0,JOYUP
+	JEQ d6n1
+	LI R0,>8537		* UP
+	BL @VDPWTA
+	jmp d6lp
+	
+d6n1
+	mov joydat,r0	* see what's set (only 1 at a time showable)
+	andi r0,JOYDOWN
+	JEQ d6n2
+	LI R0,>8538		* DOWN
+	BL @VDPWTA
+	jmp d6lp
+	
+d6n2
+	mov joydat,r0	* see what's set (only 1 at a time showable)
+	andi r0,JOYLEFT
+	JEQ d6n3
+	LI R0,>8539		* LEFT
+	BL @VDPWTA
+	jmp d6lp
+	
+d6n3
+	mov joydat,r0	* see what's set (only 1 at a time showable)
+	andi r0,JOYRIGHT
+	JEQ d6n4
+	LI R0,>853A		* RIGHT
+	BL @VDPWTA
+	jmp d6lp
+	
+d6n4
+	mov joydat,r0	* see what's set (only 1 at a time showable)
+	andi r0,JOYFIRE
+	JEQ d6n5
+	LI R0,>853B		* FIRE
+	BL @VDPWTA
+	jmp d6lp
+	
+d6n5
+	LI R0,>8536		* NONE
+	BL @VDPWTA
+	jmp d6lp
+
+d6done
+
+***************************************************
+* diag 7 - color bar warning
+***************************************************
+	LI R0,>2a58
+	BL @SHOWANDPAUSE2
+
+* just delay for 5 seconds
+	LI R1,300
+	BL @DELAY
+	
+***************************************************
+* diag 8 - show color bars and wait for QUIT
+***************************************************
+	LI R0,>2A51
+	BL @SHOWANDPAUSE2
+
+ENDDIAG
+	BL @JOYFAST
+	JMP ENDDIAG
+	
+
+* BCD lookup table for digits (top half only, bottom half add 32)
+* each value from 0-99 returns a word representing two digits
+BCDLOOKUP
+	DATA >A7A7,>A7A8,>A7A9,>A7AA,>A7AB,>A7AC
+	DATA >A7AD,>A7AE,>A7AF,>A7B0,>A8A7,>A8A8
+	DATA >A8A9,>A8AA,>A8AB,>A8AC,>A8AD,>A8AE
+	DATA >A8AF,>A8B0,>A9A7,>A9A8,>A9A9,>A9AA
+	DATA >A9AB,>A9AC,>A9AD,>A9AE,>A9AF,>A9B0
+	DATA >AAA7,>AAA8,>AAA9,>AAAA,>AAAB,>AAAC
+	DATA >AAAD,>AAAE,>AAAF,>AAB0,>ABA7,>ABA8
+	DATA >ABA9,>ABAA,>ABAB,>ABAC,>ABAD,>ABAE
+	DATA >ABAF,>ABB0,>ACA7,>ACA8,>ACA9,>ACAA
+	DATA >ACAB,>ACAC,>ACAD,>ACAE,>ACAF,>ACB0
+	DATA >ADA7,>ADA8,>ADA9,>ADAA,>ADAB,>ADAC
+	DATA >ADAD,>ADAE,>ADAF,>ADB0,>AEA7,>AEA8
+	DATA >AEA9,>AEAA,>AEAB,>AEAC,>AEAD,>AEAE
+	DATA >AEAF,>AEB0,>AFA7,>AFA8,>AFA9,>AFAA
+	DATA >AFAB,>AFAC,>AFAD,>AFAE,>AFAF,>AFB0
+	DATA >B0A7,>B0A8,>B0A9,>B0AA,>B0AB,>B0AC
+	DATA >B0AD,>B0AE,>B0AF,>B0B0
+
+SCALE
+	DATA >0c1a,>0d17,>0315,>0014,>0d11,>0e0f,>020e,>060d
+
+QUITK DATA >1100
+	
+    END
+    

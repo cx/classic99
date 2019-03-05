@@ -91,6 +91,78 @@
     <ClCompile Include="disk\cf7Disk.cpp">
       <Filter>disk</Filter>
     </ClCompile>
+    <ClCompile Include="hw_gigaCartProgram.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_ram32k.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_ramScratchpad.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_gigaCart.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_grom.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_ams.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_pCode.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_uberGrom.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_tms9919.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_sid.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_speech.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_mpd.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_vdp.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_rom.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_dsr.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_CF7.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_disk.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_rs232.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_bigArrayHack.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_romMBX.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_rom379.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_rom378.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_romSuperCart.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
+    <ClCompile Include="hw_ramCart.cpp">
+      <Filter>hardwares</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
@@ -162,6 +234,9 @@
     </ClInclude>
     <ClInclude Include="disk\cf7Disk.h">
       <Filter>disk</Filter>
+    </ClInclude>
+    <ClInclude Include="hwTypes.h">
+      <Filter>hardwares</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -433,17 +508,6 @@
     <None Include="roms\EA_Utils.bin">
       <Filter>roms\apps</Filter>
     </None>
-    <None Include="roms\RXBC.Bin" />
-    <None Include="roms\RXBD.Bin" />
-    <None Include="roms\RXBG.Bin" />
-    <None Include="roms\GPL%40LOADER" />
-    <None Include="roms\RXBASSM1" />
-    <None Include="roms\RXBASSM2" />
-    <None Include="roms\RXBASSM3" />
-    <None Include="roms\RXBCSAVE" />
-    <None Include="roms\RXBCSAVE2" />
-    <None Include="roms\RXBEDIT" />
-    <None Include="roms\RXBEDIU" />
     <None Include="roms\DISK.BIN">
       <Filter>roms\cards</Filter>
     </None>
@@ -456,11 +520,48 @@
     <None Include="roms\XB27_ROM_060315.bin">
       <Filter>roms\apps</Filter>
     </None>
-    <None Include="graphics\roms3.bin" />
-    <None Include="graphics\roms4.bin" />
     <None Include="readme.md" />
     <None Include="roms\fbForth200_9.bin">
       <Filter>roms\apps</Filter>
+    </None>
+    <None Include="roms\GPL%40LOADER">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="graphics\roms3.bin">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="graphics\roms4.bin">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBASSM1">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBASSM2">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBASSM3">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBC.Bin">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBCSAVE">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBCSAVE2">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBD.Bin">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBEDIT">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBEDIU">
+      <Filter>roms</Filter>
+    </None>
+    <None Include="roms\RXBG.Bin">
+      <Filter>roms</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -502,6 +603,9 @@
     </Filter>
     <Filter Include="roms\apps">
       <UniqueIdentifier>{b41083fd-c50b-4d5f-a3d8-724ab9e72f43}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="hardwares">
+      <UniqueIdentifier>{8e2b4c55-3ea6-45d5-b7c8-24dd45fa561a}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

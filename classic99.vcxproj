@@ -251,6 +251,28 @@
     <ClCompile Include="debugger\dbghook.cpp" />
     <ClCompile Include="disk\cf7Disk.cpp" />
     <ClCompile Include="disk\TICCDisk.cpp" />
+    <ClCompile Include="hw_ams.cpp" />
+    <ClCompile Include="hw_bigArrayHack.cpp" />
+    <ClCompile Include="hw_CF7.cpp" />
+    <ClCompile Include="hw_disk.cpp" />
+    <ClCompile Include="hw_dsr.cpp" />
+    <ClCompile Include="hw_gigaCart.cpp" />
+    <ClCompile Include="hw_gigaCartProgram.cpp" />
+    <ClCompile Include="hw_grom.cpp" />
+    <ClCompile Include="hw_mpd.cpp" />
+    <ClCompile Include="hw_pCode.cpp" />
+    <ClCompile Include="hw_ramCart.cpp" />
+    <ClCompile Include="hw_rom.cpp" />
+    <ClCompile Include="hw_rom378.cpp" />
+    <ClCompile Include="hw_rom379.cpp" />
+    <ClCompile Include="hw_romMBX.cpp" />
+    <ClCompile Include="hw_romSuperCart.cpp" />
+    <ClCompile Include="hw_rs232.cpp" />
+    <ClCompile Include="hw_sid.cpp" />
+    <ClCompile Include="hw_speech.cpp" />
+    <ClCompile Include="hw_tms9919.cpp" />
+    <ClCompile Include="hw_uberGrom.cpp" />
+    <ClCompile Include="hw_vdp.cpp" />
     <ClCompile Include="keyboard\kb.cpp" />
     <ClCompile Include="keyboard\keyboard.cpp">
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -275,6 +297,8 @@
     <ClCompile Include="disk\diskclass.cpp" />
     <ClCompile Include="disk\FiadDisk.cpp" />
     <ClCompile Include="disk\ImageDisk.cpp" />
+    <ClCompile Include="hw_ram32k.cpp" />
+    <ClCompile Include="hw_ramScratchpad.cpp" />
     <ClCompile Include="tape.cpp" />
     <ClCompile Include="ubercombined.cpp" />
   </ItemGroup>
@@ -288,6 +312,7 @@
     <ClInclude Include="debugger\dbghook.h" />
     <ClInclude Include="disk\cf7Disk.h" />
     <ClInclude Include="disk\TICCDisk.h" />
+    <ClInclude Include="hwTypes.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="2xSaI\2xSaI.h" />
     <ClInclude Include="debugger\bug99.h" />

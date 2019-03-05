@@ -1055,69 +1055,9 @@ LONG FAR PASCAL myproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				TriggerBreakPoint(true);				// halt the CPU
 				Sleep(50);								// wait for it...
 
-				memset(CRU, 1, 4096);					// reset 9901
-	            CRU[0]=0;	// timer control
-	            CRU[1]=0;	// peripheral interrupt mask
-	            CRU[2]=0;	// VDP interrupt mask
-	            CRU[3]=0;	// timer interrupt mask??
-            //  CRU[12-14]  // keyboard column select
-            //  CRU[15]     // Alpha lock 
-            //  CRU[24]     // audio gate (leave high)
-	            CRU[25]=0;	// mag tape out - needed for Robotron to work!
-	            CRU[27]=0;	// mag tape in (maybe all these zeros means 0 should be the default??)
-				timer9901=0;
-                timer9901Read = 0;
-				timer9901IntReq=0;
-				starttimer9901=0;
-				wrword(0x83c4,0);						// Console bug work around, make sure no user int is active
-				init_kb();								// Reset keyboard emulation
-				SetupSams(sams_enabled, sams_size);		// Prepare the AMS system
-				if (NULL != InitSid) {
-					InitSid();							// reset the SID chip
-					if (NULL != SetSidBanked) {		
-						SetSidBanked(false);			// switch it out for now
-					}
-				}
-				resetDAC();
-				readroms();								// reload the real ROMs
-				if (NULL != pCurrentHelpMsg) {
-					szDefaultWindowText="Classic99 - See Help->Known Issues for this cart";
-					SetWindowText(myWnd, szDefaultWindowText);
-				} else {
-					szDefaultWindowText="Classic99";
-					SetWindowText(myWnd, szDefaultWindowText);
-				}
-				pCPU->reset();
-				pGPU->reset();
-				pCurrentCPU = pCPU;
-				bF18AActive = 0;
-				for (int idx=0; idx<=PCODEGROMBASE; idx++) {
-					GROMBase[idx].grmaccess=2;			// no GROM accesses yet
-				}
-				nCurrentDSR=-1;
-				memset(nDSRBank, 0, sizeof(nDSRBank));
-				doLoadInt=false;						// no pending LOAD
-				vdpReset();								// TODO: should move these vars into the reset function
-				vdpaccess=0;							// No VDP address writes yet 
-				vdpwroteaddress=0;						// timer after a VDP address write to allow time to fetch
-				vdpscanline=0;
-				vdpprefetch=0;
-				vdpprefetchuninited = true;
-				VDPREG[0]=0;
-				VDPREG[1]=0;							// VDP registers 0/1 cleared on reset per datasheet
-				end_of_frame=0;							// No end of frame yet
-				CPUSpeechHalt=false;					// not halted for speech reasons
-				CPUSpeechHaltByte=0;					// byte pending for the speech hardware
-				cpucount=0;
-				cpuframes=0;
-				fKeyEverPressed=false;					// No key pressed yet (to disable the warning on cart change)
-				memset(CPUMemInited, 0, sizeof(CPUMemInited));	// no CPU mem written to yet
-				memset(VDPMemInited, 0, sizeof(VDPMemInited));	// or VDP
-				bWarmBoot = false;						// if it was a warm boot, it's done now
-				// set both joysticks as active
-				installedJoysticks = 0x03;
-				// but don't reset g_bCheckUninit
-				DoPlay();
+                doSystemReset();
+
+                DoPlay();
 				// these must come AFTER DoPlay()
 				max_cpf=(hzRate==HZ50?DEFAULT_50HZ_CPF:DEFAULT_60HZ_CPF);
 				cfg_cpf=max_cpf;
@@ -4452,6 +4392,7 @@ BOOL CALLBACK DiskBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			break;
 
 		case WM_INITDIALOG:
+            SendDlgItemMessage(hwnd, IDC_LSTTYPE, CB_LIMITTEXT, (WPARAM)255, 0);
 			SendDlgItemMessage(hwnd, IDC_LSTTYPE, CB_ADDSTRING, 0, (LPARAM)"None");
 			SendDlgItemMessage(hwnd, IDC_LSTTYPE, CB_ADDSTRING, 0, (LPARAM)"Files (FIAD)");
 			SendDlgItemMessage(hwnd, IDC_LSTTYPE, CB_ADDSTRING, 0, (LPARAM)"Image (DSK)");

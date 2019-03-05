@@ -1875,8 +1875,8 @@ Cartridge System:
 -some work on the audio clicks but it didn't really help
 -----------------------------------------------
 12 February 2019
--Update fbForth
-
+-Update fbForth to 2.0:11
+-Update Harry Wilhelm contributions
 
 
 -TODO: delete the "V9T9 reverse DSSD layout" - never seen one, and if we do, we should fix it ;)

@@ -68,6 +68,7 @@
 
 #include "..\resource.h"
 #include "tiemul.h"
+#include "hwtypes.h"
 #include "cpu9900.h"
 #include "..\SpeechDll\5220intf.h"
 #include "..\addons\rs232_pio.h"
@@ -153,7 +154,6 @@ bool BreakOnDiskCorrupt = false;
 bool gDisableDebugKeys = false;
 CRITICAL_SECTION debugCS;
 char g_cmdLine[512];
-extern bool bWarmBoot;
 
 // disk
 extern bool bCorruptDSKRAM;
@@ -180,11 +180,9 @@ typedef union {
 Byte CPUMemInited[65536];					// not going to support AMS yet -- might switch to bits, but need to sort out AMS memory usage (16MB vs 1MB?)
 Byte VDPMemInited[128*1024];				// track VDP mem
 bool g_bCheckUninit = false;				// track reads from uninitialized RAM
-bool nvRamUpdated = false;					// if cartridge RAM is written to (also needs an NVRAM type to be saved)
 
 extern Byte staticCPU[0x10000];				// main memory
 Byte *CPU2=NULL;				            // Cartridge space bank-switched (ROM >6000 space, 8k blocks, XB, 379, SuperSpace and MBX ROM), sized by xbmask
-Byte mbx_ram[1024];							// MBX cartridge RAM (1k)
 Byte ROMMAP[65536];							// Write-protect map of CPU space
 Byte DumpMap[65536];						// map for data to dump to files
 FILE *DumpFile[10];							// byte dump file 0-9
@@ -203,6 +201,9 @@ int  nLoadedUserGroups=0;					// how many groups
 char UserGroupNames[100][32];				// name of each group
 int nTotalUserCarts=0;						// total user carts loaded
 int CRUTimerTicks=0;						// used for 9901 timer
+
+readFunc readFunctions[64*1024];            // read functions for every address
+writeFunc writeFunctions[64*1024];          // write functions for every address
 
 unsigned char DummyROM[6]={
 	0x83, 0x00,								// >0000	reset vector: workspace
@@ -1355,36 +1356,6 @@ void SaveConfig() {
 
 }
 
-// convert config into meaningful values for AMS system
-void SetupSams(int sams_mode, int sams_size) {
-	EmulationMode emuMode = None;
-	AmsMemorySize amsSize = Mem128k;
-	
-	// TODO: We don't really NEED this translation layer, but we can remove it later.
-	if (sams_mode) {
-		// currently only SuperAMS, so if anything set use that
-		emuMode = Sams;
-
-		switch (sams_size) {
-		case 1:
-			amsSize = Mem256k;
-			break;
-		case 2:
-			amsSize = Mem512k;
-			break;
-		case 3:
-			amsSize = Mem1024k;
-			break;
-		default:
-			break;
-		}
-	}
-
-	SetAmsMemorySize(amsSize);
-	InitializeMemorySystem(emuMode);
-	SetMemoryMapperMode(Map);
-}
-
 void CloseDumpFiles() {
 	for (int idx=0; idx<65536; idx++) {
 		if (DumpMap[idx]) {
@@ -1437,6 +1408,71 @@ void UpdateUserCartMRU() {
 			}
 		}
 	}
+}
+
+// reset the emulator
+void doSystemReset() {
+	memset(CRU, 1, 4096);					// reset 9901
+	CRU[0]=0;	// timer control
+	CRU[1]=0;	// peripheral interrupt mask
+	CRU[2]=0;	// VDP interrupt mask
+	CRU[3]=0;	// timer interrupt mask??
+//  CRU[12-14]  // keyboard column select
+//  CRU[15]     // Alpha lock 
+//  CRU[24]     // audio gate (leave high)
+	CRU[25]=0;	// mag tape out - needed for Robotron to work!
+	CRU[27]=0;	// mag tape in (maybe all these zeros means 0 should be the default??)
+	timer9901=0;
+    timer9901Read = 0;
+	timer9901IntReq=0;
+	starttimer9901=0;
+	wrword(0x83c4,0);						// Console bug work around, make sure no user int is active
+	init_kb();								// Reset keyboard emulation
+	if (NULL != InitSid) {
+		InitSid();							// reset the SID chip
+		if (NULL != SetSidBanked) {		
+			SetSidBanked(false);			// switch it out for now
+		}
+	}
+	resetDAC();
+	readroms();								// reload the real ROMs
+	if (NULL != pCurrentHelpMsg) {
+		szDefaultWindowText="Classic99 - See Help->Known Issues for this cart";
+		SetWindowText(myWnd, szDefaultWindowText);
+	} else {
+		szDefaultWindowText="Classic99";
+		SetWindowText(myWnd, szDefaultWindowText);
+	}
+	pCPU->reset();
+	pGPU->reset();
+	pCurrentCPU = pCPU;
+	bF18AActive = 0;
+	for (int idx=0; idx<=PCODEGROMBASE; idx++) {
+		GROMBase[idx].grmaccess=2;			// no GROM accesses yet
+	}
+	nCurrentDSR=-1;
+	memset(nDSRBank, 0, sizeof(nDSRBank));
+	doLoadInt=false;						// no pending LOAD
+	vdpReset();								// TODO: should move these vars into the reset function
+	vdpaccess=0;							// No VDP address writes yet 
+	vdpwroteaddress=0;						// timer after a VDP address write to allow time to fetch
+	vdpscanline=0;
+	vdpprefetch=0;
+	vdpprefetchuninited = true;
+	VDPREG[0]=0;
+	VDPREG[1]=0;							// VDP registers 0/1 cleared on reset per datasheet
+	end_of_frame=0;							// No end of frame yet
+	CPUSpeechHalt=false;					// not halted for speech reasons
+	CPUSpeechHaltByte=0;					// byte pending for the speech hardware
+	cpucount=0;
+	cpuframes=0;
+	fKeyEverPressed=false;					// No key pressed yet (to disable the warning on cart change)
+	memset(CPUMemInited, 0, sizeof(CPUMemInited));	// no CPU mem written to yet
+	memset(VDPMemInited, 0, sizeof(VDPMemInited));	// or VDP
+	bWarmBoot = false;						// if it was a warm boot, it's done now
+	// set both joysticks as active
+	installedJoysticks = 0x03;
+	// but don't reset g_bCheckUninit
 }
 
 ///////////////////////////////////
@@ -1648,21 +1684,7 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
         GROMBase[idx].LastBase=0;
 	}
 		
-	vdpReset();			// TODO: should move these vars into the reset function
-	vdpaccess=0;		// No VDP address writes yet 
-	vdpwroteaddress=0;
-	vdpscanline=0;
-	vdpprefetch=0;		// Not really accurate, but eh
-	vdpprefetchuninited=true;
-	end_of_frame=0;		// Not end of frame yet
 	quitflag=0;			// no quit yet
-	nCurrentDSR=-1;		// no DSR selected
-	memset(nDSRBank, 0, sizeof(nDSRBank));
-	timer9901=0;		// timer is idle
-    timer9901Read =0;
-	starttimer9901=0;
-	timer9901IntReq=0;
-	doLoadInt=false;			// no pending LOAD
 
 	// clear debugging strings
 	memset(lines, 0, sizeof(lines));
@@ -1715,8 +1737,6 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
 	sams_size=3;				// 1MB by default when on (no reason not to use a large card)
 	nSystem=1;					// TI-99/4A
 	max_volume=80;				// percentage of maximum volume to use
-	CPUSpeechHalt=false;		// not halted for speech reasons
-	CPUSpeechHaltByte=0;		// doesn't matter
 	doLoadInt=false;			// no pending LOAD
 	pCPU->enableDebug=1;		// whether breakpoints affect CPU
 	pGPU->enableDebug=1;		// whether breakpoints affect GPU
@@ -1736,9 +1756,6 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
 
 	// Read configuration - uses above settings as default!
 	ReadConfig();
-
-	// assume both joysticks are there
-	installedJoysticks = 3;
 
 	// position the window if needed
 	if ((nVideoLeft != -1) || (nVideoTop != -1)) {
@@ -1785,9 +1802,6 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
 	
 	// set temp stuff
 	cfg_cpf=max_cpf;
-
-	// set up SAMS emulation
-	SetupSams(sams_enabled, sams_size);
 
 	// Load a dummy CPU ROM for the emu to spin on till we load something real
 	WriteMemoryBlock(0x0000, DummyROM, 6);
@@ -1850,12 +1864,8 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
 		SendMessage(myWnd, WM_COMMAND, ID_FILE_RESET, 1);
 	}
 
-	// reset the CPU
-	pCPU->reset();
-	pGPU->reset();
-
-	// Initialize emulated keyboard
-	init_kb();
+    // Init the system
+    doSystemReset();
 
 	// start sound
 	debug_write("Starting Sound");
@@ -1865,8 +1875,6 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hInPrevInstance, LPSTR lpCmdLine,
 	debug_write("Starting Disk");
 
 	// prepare the emulation...
-	cpucount=0;
-	cpuframes=0;
 	timercount=0;
 
 	// set up 60hz timer
@@ -3022,6 +3030,12 @@ void LoadOneImg(struct IMG *pImg, char *szFork) {
 void readroms() { 
 	int idx;
 
+    // reset the hardware read/write pointers to RAM
+    for (idx = 0; idx < 64*1024; ++idx) {
+        readFunctions[idx] = readZero;
+        writeFunctions[idx] = writeZero;
+    }
+
 #ifdef USE_BIG_ARRAY
 	// TODO HACK
 	{
@@ -3092,16 +3106,6 @@ void readroms() {
 		memrnd(CPU2, 8192*(xb+1));
 		memrnd(VDP, 16384);
 	}
-	memset(CRU, 1, 4096);		// I think CRU is deterministic
-	CRU[0]=0;	// timer control
-	CRU[1]=0;	// peripheral interrupt mask
-	CRU[2]=0;	// VDP interrupt mask
-	CRU[3]=0;	// timer interrupt mask??
-//  CRU[12-14]  // keyboard column select
-//  CRU[15]     // Alpha lock 
-//  CRU[24]     // audio gate (leave high)
-	CRU[25]=0;	// mag tape out - needed for Robotron to work!
-	CRU[27]=0;	// mag tape in (maybe all these zeros means 0 should be the default??)
 	memset(DSR, 0, 16*16384);	// not normally RAM
 	memset(key, 0, 256);		// keyboard
 
@@ -3880,6 +3884,14 @@ void verifyCallFiles() {
 	}
 }
 
+// Zero handlers for unconfigured addresses
+Byte readZero(Word /*addr*/, bool /*rmw*/) {
+    return 0;
+}
+void writeZero(Word /*addr*/, Byte /*data*/) {
+    // do nothing
+}
+
 //////////////////////////////////////////////////////
 // Read a single byte from CPU memory
 //////////////////////////////////////////////////////
@@ -3921,192 +3933,18 @@ Byte rcpubyte(Word x,bool rmw) {
 		}
 
 		// the cycle timing for read-before-write is dealt with in the opcodes
+        // the only zero-wait-state memory is >0000 through >1FFF, and >8000 through >83FF
+        // handling the wait state generator here rather than in the device handlers
 		if ((x & 0x01) == 0) {					// this is a wait state (we cancel it below for ROM and scratchpad)
-			pCurrentCPU->AddCycleCount(4);		// we can't do half of a wait, so just do it for the even addresses. This should
-												// be right now that the CPU emulation does all Word accesses
+            if ((x > 0x2000) && ((x < 0x8000) || (x >= 0x8400))) {
+    			pCurrentCPU->AddCycleCount(4);		// we can't do half of a wait, so just do it for the even addresses. This should
+	    											// be right now that the CPU emulation does all Word accesses
+            }
 		}
 	}
 
-
-	switch (x & 0xe000) {
-		case 0x8000:
-			switch (x & 0xfc00) {
-				case 0x8000:				// scratchpad RAM - 256 bytes repeating.
-					if ((!rmw) && ((x & 0x01) == 0)) {
-						pCurrentCPU->AddCycleCount(-4);			// never mind for scratchpad :)
-					}
-					return ReadMemoryByte(x | 0x0300, !rmw);	// I map it all to >83xx
-				case 0x8400:				// Don't read the sound chip (can hang a real TI? maybe only on early ones?)
-					return 0;
-				case 0x8800:				// VDP read data
-					if (x&1) {
-						// don't respond on odd addresses
-						return 0;
-					}
-					return(rvdpbyte(x,rmw));
-				case 0x8c00:				// VDP write data
-					if (x&1) {
-						// don't respond on odd addresses
-						return 0;
-					}
-					return 0;
-				case 0x9000:				// Speech read data
-					if (x&1) {
-						// don't respond on odd addresses
-						return 0;
-					}
-                    // timing handled in rspeechbyte
-					return(rspeechbyte(x));
-				case 0x9400:				// Speech write data
-					if (x&1) {
-						// don't respond on odd addresses
-						return 0;
-					}
-					return 0;
-				case 0x9800:				// read GROM data
-					if (x&1) {
-						// don't respond on odd addresses
-						return 0;
-					}
-					{
-						// always access console GROMs to keep them in sync
-						Byte nRet = rgrmbyte(x,rmw);
-						return nRet;
-					}
-				case 0x9c00:				// write GROM data
-					return 0;
-				default:					// We shouldn't get here, but just in case...
-					return 0;
-			}
-		case 0x0000:					// console ROM
-			if ((!rmw) && ((x & 0x01) == 0)) {
-				pCurrentCPU->AddCycleCount(-4);			// never mind for scratchpad :)
-			}
-			// fall through
-		case 0x2000:					// normal CPU RAM
-		case 0xa000:					// normal CPU RAM
-		case 0xc000:					// normal CPU RAM
-		case 0xe000:					// normal CPU RAM
-			return ReadMemoryByte(x, !rmw);
-
-		case 0x4000:					// DSR ROM (with bank switching and CRU)
-			if (ROMMAP[x]) {			
-				// someone loaded ROM here, override the DSR system
-				return ReadMemoryByte(x, !rmw);
-			}
-
-			if (-1 == nCurrentDSR) return 0;
-
-			// special case for P-Code Card GROM addresses
-			if (nCurrentDSR == 0xf) {
-				if ((x&1) == 0) {
-					// don't respond on odd addresses (confirmed)
-					switch (x) {
-						case 0x5bfc:		// read grom data
-						case 0x5bfe:		// read grom address
-							return(rpcodebyte(x));
-
-						case 0x5ffc:		// write data
-						case 0x5ffe:		// write address
-							return 0;
-					}
-				}
-				// any other case, fall through
-			}
-
-			// SAMS support
-			if (nCurrentDSR == 0xe) {
-				// registers are selected by A11 through A14 when in
-				// the >4000->5FFF range, but this function does a little
-				// extra shifting itself. (We may want more bits later for
-				// Thierry's bigger AMS card hack, but not for now).
-				if (MapperRegistersEnabled()) {
-					// 0000 0000 000x xxx0
-					Byte reg = (x & 0x1e) >> 1;
-					bool hiByte = ((x & 1) == 0);		// 16 bit registers!
-					return ReadMapperRegisterByte(reg, hiByte);
-				}
-				return 0;
-			}
-
-			// TI Disk controller, if active
-			if ((nCurrentDSR == 0x01) && (nDSRBank[1] > 0) && (x>=0x5ff0) && (x<=0x5fff)) {
-				return ReadTICCRegister(x);
-			}
-
-			// RS232/PIO
-			if (nCurrentDSR == 0x3) {
-				// currently we aren't mapping any ROM space - this will change!
-				return ReadRS232Mem(x-0x4000);
-			}
-
-            // CF7
-            if ((nCurrentDSR == 0x00) && (csCf7Bios.GetLength() > 0) && (x>=0x5e00) && (x<0x5f00)) {
-                return read_cf7(x);
-            }
-
-            // just access memory
-			if (nDSRBank[nCurrentDSR]) {
-				return DSR[nCurrentDSR][x-0x2000];	// page 1: -0x4000 for base, +0x2000 for second page
-			} else {
-				return DSR[nCurrentDSR][x-0x4000];	// page 0: -0x4000 for base address
-			}
-			break;
-
-		case 0x6000:					// cartridge ROM
-#ifdef USE_BIG_ARRAY
-			if (BIGARRAYSIZE > 0) {
-				// TODO BIG HACK - FAKE CART HARDWARE FOR VIDEO TEST
-				if (x == 0x7fff) {
-					if (BIGARRAYADD >= BIGARRAYSIZE) {
-						// TODO: real hardware probably won't do this either.
-						BIGARRAYADD = 0;
-					}
-					Byte ret = BIGARRAY[BIGARRAYADD++];
-					return ret;
-				}
-				if (x == 0x7ffb) {
-					// destructive address read - MSB first for consistency
-					Byte ret = (BIGARRAYADD >> 24) & 0xff;
-					BIGARRAYADD <<= 8;
-					debug_write("(Read) Big array address now 0x%08X", BIGARRAYADD);
-					return ret;
-				}
-				if (x == 0x6000) {
-					// TODO: real hardware probably will not do this. Don't count on the address being reset.
-					debug_write("Reset big array address");
-					BIGARRAYADD = 0;
-				}
-				// END TODO
-			}
-#endif
-			if (!bUsesMBX) {
-				// XB is supposed to only page the upper 4k, but some Atari carts seem to like it all
-				// paged. Most XB dumps take this into account so only full 8k paging is implemented.
-				if (xb) {
-                    // make sure xbBank never exceeds xb
-					return(CPU2[(xbBank<<13)+(x-0x6000)]);	// cartridge bank 2 and up
-				} else {
-					return ReadMemoryByte(x, !rmw);			// cartridge bank 1
-				}
-			} else {
-				// MBX is weird. The lower 4k is fixed, but the top 1k of that is RAM
-				// The upper 4k is bank switched. Address >6FFE has a bank switch
-				// register updated from the data bus.
-				if ((x>=0x6C00)&&(x<0x6FFE)) {
-					return mbx_ram[x-0x6c00];				// MBX RAM
-				} else if (x < 0x6c00) {
-					return CPU2[x-0x6000];					// MBX fixed ROM
-				} else {
-					return(CPU2[(xbBank<<13)+(x-0x6000)]);	// MBX paged ROM	// TODO: isn't this 8k paging? Why does this work? What do the ROMs look like?
-				}
-				// anything else is ignored
-			}
-			break;
-
-		default:						// We shouldn't get here, but just in case...
-			return 0;
-	}
+    // pass the read to the handler - it's never allowed to be NULL
+    return readFunctions[x](x, rmw);
 }
 
 //////////////////////////////////////////////////////////
@@ -4139,195 +3977,19 @@ void wcpubyte(Word x, Byte c)
 		}
 	}
 
+	// the cycle timing for read-before-write is dealt with in the opcodes
+    // the only zero-wait-state memory is >0000 through >1FFF, and >8000 through >83FF
+    // handling the wait state generator here rather than in the device handlers
 	if ((x & 0x01) == 0) {					// this is a wait state (we cancel it below for ROM and scratchpad)
-		pCurrentCPU->AddCycleCount(4);		// we can't do half of a wait, so just do it for the even addresses. This should
-											// be right now that the CPU emulation does all Word accesses
+        if ((x > 0x2000) && ((x < 0x8000) || (x >= 0x8400))) {
+    		pCurrentCPU->AddCycleCount(4);		// we can't do half of a wait, so just do it for the even addresses. This should
+	    										// be right now that the CPU emulation does all Word accesses
+        }
 	}
 
-    // check for cartridge banking
-	if ((x>=0x6000)&&(x<0x8000)) {
-#ifdef USE_BIG_ARRAY
-		if ((x == 0x7ffd) && (BIGARRAYSIZE > 0)) {
-			// write the address register
-			BIGARRAYADD = (BIGARRAYADD<<8) | c;
-			debug_write("(Write) Big array address now 0x%08X", BIGARRAYADD);
-			goto checkmem;
-		} else
-#endif
-		
-		if ((xb) && (ROMMAP[x])) {		// trap ROM writes and check for XB bank switch
-            // collect bits from address and data buses - x is address, c is data
-            int bits = (c<<13)|(x&0x1fff);
-			if (bInvertedBanks) {
-				// uses inverted address lines!
-				xbBank=(((~bits)>>1)&xb);		// XB bank switch, up to 4096 banks
-			} else if (bUsesMBX) {
-				// MBX is weird. The lower 4k is fixed, but the top 1k of that is RAM
-				// The upper 4k is bank switched. Address >6FFE has a bank switch
-				// register updated from the data bus. (Doesn't use 'bits')
-				if ((x>=0x6C00)&&(x<0x6FFE)) {
-					mbx_ram[x-0x6c00] = c;
-				} else if (x==0x6ffe) {
-					xbBank = c&xb;
-					// the theory is this also writes to RAM
-					mbx_ram[x-0x6c00] = c;
-				}
-				// anything else is ignored
-			} else {
-				xbBank=(((bits)>>1)&xb);		// XB bank switch, up to 4096 banks
-			}
-			goto checkmem;
-		}
-		// else it's RAM there
-	}
+    // pass the write to the handler - it's never allowed to be NULL
+    writeFunctions[x](x);
 
-	switch (x & 0xe000) {
-		case 0x8000:
-			switch (x & 0xfc00) {
-				case 0x8000:				// scratchpad RAM - 256 bytes repeating.
-				if ((x & 0x01) == 0) {		// never mind for scratchpad
-					pCurrentCPU->AddCycleCount(-4);		// we can't do half of a wait, so just do it for the even addresses. This should
-														// be right now that the CPU emulation does all Word accesses
-				}
-				WriteMemoryByte((x | 0x0300), c, false);  // I map it all to >83xx
-				break;
-			case 0x8400:				// Sound write data
-				if (x&1) {
-					// don't respond on odd addresses
-					return;
-				}
-				wsndbyte(c);
-                // sound chip writes eat ~28 additional cycles (verified hardware, reads do not)
-				pCurrentCPU->AddCycleCount(28);
-				break;
-			case 0x8800:				// VDP read data
-				break;
-			case 0x8c00:				// VDP write data
-				if (x&1) {
-					// don't respond on odd addresses
-					return;
-				}
-				wvdpbyte(x,c);
-				break;
-			case 0x9000:				// Speech read data
-				break;
-			case 0x9400:				// Speech write data
-				if (x&1) {
-					// don't respond on odd addresses
-					return;
-				}
-                // timing handled in wspeechbyte
-				wspeechbyte(x,c);
-				break;
-			case 0x9800:				// read GROM data
-				break;
-			case 0x9c00:				// write GROM data
-				if (x&1) {
-					// don't respond on odd addresses
-					return;
-				}
-				wgrmbyte(x,c);
-				break;
-			default:					// We shouldn't get here, but just in case...
-				break;
-		}
-		break;
-
-		case 0x0000:					// console ROM
-			if ((x & 0x01) == 0) {		// never mind for ROM
-				pCurrentCPU->AddCycleCount(-4);		// we can't do half of a wait, so just do it for the even addresses. This should
-													// be right now that the CPU emulation does all Word accesses
-			}
-			// fall through
-		case 0x2000:					// normal CPU RAM
-		case 0xa000:					// normal CPU RAM
-		case 0xc000:					// normal CPU RAM
-		case 0xe000:					// normal CPU RAM
-			if (!ROMMAP[x]) {
-				WriteMemoryByte(x, c, false);
-			}
-			break;
-
-		case 0x6000:					// Cartridge RAM (ROM is trapped above)
-			// but we test it anyway. Just in case. ;) I think the above is just for bank switches
-			if (!ROMMAP[x]) {
-				WriteMemoryByte(x, c, false);
-				nvRamUpdated = true;
-			}
-			break;
-
-		case 0x4000:					// DSR ROM
-			switch (nCurrentDSR) {
-			case -1:
-				// no DSR, so might be SID card
-				if (NULL != write_sid) {
-					write_sid(x, c);
-				}
-				break;
-
-            case 0x0:
-                // CF7, if it's loaded
-                if (csCf7Bios.GetLength() > 0) {
-                    write_cf7(x, c);
-                }
-                break;
-
-			case 0x1:
-				// TI Disk controller, if switched in
-				if (nDSRBank[1] > 0) {
-					WriteTICCRegister(x, c);
-				}
-				break;
-			
-			case 0x3:
-				// RS232/PIO card
-				{
-					// currently we aren't mapping any ROM space - this will change!
-					WriteRS232Mem(x-0x4000, c);
-					goto checkmem;
-				}
-				break;
-
-			case 0xe:
-				// SAMS support
-				{
-					// registers are selected by A11 through A14 when in
-					// the >4000->5FFF range, but this function does a little
-					// extra shifting itself. (We may want more bits later for
-					// Thierry's bigger AMS card hack, but not for now).
-					if (MapperRegistersEnabled()) {
-						// 0000 0000 000x xxx0
-						Byte reg = (x & 0x1e) >> 1;
-						bool hiByte = ((x & 1) == 0);	// registers are 16 bit!
-						WriteMapperRegisterByte(reg, c, hiByte);
-					}
-					return;
-				}
-				break;
-
-			case 0xf:
-				// special case for P-Code Card GROM addresses
-				{
-					if ((x&1) == 0) {
-					// don't respond on odd addresses (confirmed)
-						switch (x) {
-							case 0x5bfc:		// read grom data
-							case 0x5bfe:		// read grom address
-								break;
-
-							case 0x5ffc:		// write grom data
-							case 0x5ffe:		// write grom address
-  								wpcodebyte(x,c);
-								goto checkmem;
-						}
-					}
-					// any other case, fall through, but we currently treat all DSR memory as ROM
-				}
-				break;
-			}
-	}
-
-checkmem:
 	// check breakpoints against what was written to where
 	for (int idx=0; idx<nBreakPoints; idx++) {
 		switch (BreakPoints[idx].Type) {
@@ -4338,813 +4000,6 @@ checkmem:
 				break;
 		}
 	}
-}
-
-//////////////////////////////////////////////////////
-// Read a byte from the speech synthesizer
-//////////////////////////////////////////////////////
-Byte rspeechbyte(Word x)
-{
-	Byte ret=0;
-
-	if ((SpeechRead)&&(SpeechEnabled)) {
-		ret=SpeechRead();
-        // speech chip, if attached, reads eat 48 additional cycles (verified hardware)
-		pCurrentCPU->AddCycleCount(48);
-	}
-	return ret;
-}
-
-//////////////////////////////////////////////////////
-// Write a byte to the speech synthesizer
-//////////////////////////////////////////////////////
-void wspeechbyte(Word x, Byte c)
-{
-	static int cnt = 0;
-
-	if ((SpeechWrite)&&(SpeechEnabled)) {
-		if (!SpeechWrite(c, CPUSpeechHalt)) {
-			if (!CPUSpeechHalt) {
-				debug_write("Speech halt triggered.");
-				CPUSpeechHalt=true;
-				CPUSpeechHaltByte=c;
-				pCPU->StartHalt(HALT_SPEECH);
-				cnt = 0;
-			} else {
-				cnt++;
-			}
-		} else {
-			// must be unblocked!
-			if (CPUSpeechHalt) {
-				debug_write("Speech halt cleared at %d cycles.", cnt*10);
-			}
-			// always clear it, just to be safe
-			pCPU->StopHalt(HALT_SPEECH);
-			CPUSpeechHalt = false;
-			cnt = 0;
-		}
-        // speech chip, if attached, writes eat 64 additional cycles (verified hardware)
-        // TODO: not verified if this is still true after a halt occurs, but since a halt
-        // is variable length, maybe it doesn't matter...
-		pCurrentCPU->AddCycleCount(64);
-	}
-}
-
-//////////////////////////////////////////////////////
-// Speech Update function - runs every x instructions
-// Pass in number of samples to process.
-//////////////////////////////////////////////////////
-void SpeechUpdate(int nSamples) {
-	if ((speechbuf==NULL) || (SpeechProcess == NULL)) {
-		// nothing to write to, so don't bother to halt
-		CPUSpeechHalt=false;
-		pCPU->StopHalt(HALT_SPEECH);
-		return;
-	}
-
-	if (nSpeechTmpPos+nSamples >= SPEECHRATE*2) {
-		// in theory, this should not happen, though it may if we
-		// run the 9900 very fast
-//			debug_write("Speech buffer full... dropping");
-		return;
-	}
-
-	SpeechProcess((unsigned char*)&SpeechTmp[nSpeechTmpPos], nSamples);
-	nSpeechTmpPos+=nSamples;
-}
-
-void SpeechBufferCopy() {
-	DWORD iRead, iWrite;
-	Byte *ptr1, *ptr2;
-	DWORD len1, len2;
-	static DWORD lastRead=0;
-
-	if (nSpeechTmpPos == 0) {
-		// no data to write
-		return;
-	}
-
-	// just for statistics
-	speechbuf->GetCurrentPosition(&iRead, &iWrite);
-//	debug_write("Read/Write bytes: %5d/%5d", iRead-lastRead, nSpeechTmpPos*2);
-	lastRead=iRead;
-
-	if (SUCCEEDED(speechbuf->Lock(iWrite, nSpeechTmpPos*2, (void**)&ptr1, &len1, (void**)&ptr2, &len2, DSBLOCK_FROMWRITECURSOR))) 
-	{
-		memcpy(ptr1, SpeechTmp, len1);
-		if (len2 > 0) {							// handle wraparound
-			memcpy(ptr2, &SpeechTmp[len1/2], len2);
-		}
-		speechbuf->Unlock(ptr1, len1, ptr2, len2);	
-		
-		// reset the buffer
-		nSpeechTmpPos=0;
-	} else {
-//		debug_write("Speech buffer lock failed");
-		// don't reset the buffer, we may get it next time
-	}
-}
-
-//////////////////////////////////////////////////////
-// Increment VDP Address
-//////////////////////////////////////////////////////
-void increment_vdpadd() 
-{
-	VDPADD=(++VDPADD) & 0x3fff;
-}
-
-//////////////////////////////////////////////////////
-// Return the actual 16k address taking the 4k mode bit
-// into account.
-//////////////////////////////////////////////////////
-int GetRealVDP() {
-	int RealVDP;
-
-	// force 4k drams (16k bit not emulated)
-//	return VDPADD&0x0fff;
-
-	// The 9938 and 9958 don't honor this bit, they always assume 128k (which we don't emulate, but we can at least do 16k like the F18A)
-	// note that the 128k hack actually does support 128k now... as needed. So if bEnable128k is on, we take VDPREG[14]&0x07 for the next 3 bits.
-	if ((bEnable80Columns) || (VDPREG[1]&0x80)) {
-		// 16k mode - address is 7 bits + 7 bits, so use it raw
-		// xx65 4321 0654 3210
-		// This mask is not really needed because VDPADD already tracks only 14 bits
-		RealVDP = VDPADD;	// & 0x3FFF;
-
-		if (bEnable128k) {
-			RealVDP|=VDPREG[14]<<14;
-		}
-		
-	} else {
-		// 4k mode -- address is 6 bits + 6 bits, but because of the 16k RAMs,
-		// it gets padded back up to 7 bit each for row and col
-		// The actual method used is a little complex to describe (although
-		// I'm sure it's simple in silicon). The lower 6 bits are used as-is.
-		// The next /7/ bits are rotated left one position.. not really sure
-		// why they didn't just do a 6 bit shift and lose the top bit, but
-		// this does seem to match every test I throw at it now. Finally, the
-		// 13th bit (MSB for the VDP) is left untouched. There are no fixed bits.
-		// Test values confirmed on real console:
-		// 1100 -> 0240
-		// 1810 -> 1050
-		// 2210 -> 2410
-		// 2211 -> 2411
-		// 2240 -> 2280
-		// 3210 -> 2450
-		// 3810 -> 3050
-		// Of course, only after working all this out did I look at Sean Young's
-		// document, which describes this same thing from the hardware side. Those
-		// notes confirm mine.
-		//
-		//         static bits       shifted bits           rotated bit
-		RealVDP = (VDPADD&0x203f) | ((VDPADD&0x0fc0)<<1) | ((VDPADD&0x1000)>>7);
-	}
-
-	// force 8k DRAMs (strip top row bit - this should be right - console doesn't work though)
-//	RealVDP&=0x1FFF;
-
-// To watch the console VDP RAM detect code
-//	if (GROMBase[0].GRMADD < 0x100) {
-//		debug_write("VDP Address prefetch %02X from %04X, real address %04X", vdpprefetch, VDPADD-1, RealVDP-1);
-//	}
-
-	return RealVDP;
-}
-
-//////////////////////////////////////////////////////////////
-// Read from VDP chip
-//////////////////////////////////////////////////////////////
-Byte rvdpbyte(Word x, bool rmw)
-{ 
-	unsigned short z;
-
-	if ((x>=0x8c00) || (x&1))
-	{
-		return(0);											// write address
-	}
-
-	if (x&0x0002)
-	{	/* read status */
-
-		// This works around code that requires the VDP state to be able to change
-		// DURING an instruction (the old code, the VDP state and the VDP interrupt
-		// would both change and be recognized between instructions). With this
-		// approach, we can update the VDP in the future, then run the instruction
-		// against the updated VDP state. This allows Lee's fbForth random number
-		// code to function, which worked by watching for the interrupt bit while
-		// leaving interrupts enabled.
-		updateVDP(-pCurrentCPU->GetCycleCount());
-
-		// The F18A turns off DPM if any status register is read
-		if ((bF18AActive)&&(bF18ADataPortMode)) {
-			bF18ADataPortMode = 0;
-			F18APaletteRegisterNo = 0;
-			debug_write("F18A Data port mode off (status register read).");
-		}
-
-		// Added by RasmusM
-		if ((bF18AActive) && (F18AStatusRegisterNo > 0)) {
-			return getF18AStatus();
-		}
-		// RasmusM added end
-		z=VDPS;				// does not affect prefetch or address (tested on hardware)
-		VDPS&=0x1f;			// top flags are cleared on read (tested on hardware)
-		vdpaccess=0;		// reset byte flag
-
-		// TODO: hack to make Miner2049 work. If we are reading the status register mid-frame,
-		// and neither 5S or F are set, return a random sprite index as if we were counting up.
-		// Remove this when the proper scanline VDP is in. (Miner2049 cares about bit 0x02)
-		if ((z&(VDPS_5SPR|VDPS_INT)) == 0) {
-			// This search code borrowed from the sprite draw code
-			int highest=31;
-			int SAL=((VDPREG[5]&0x7f)<<7);
-
-			// find the highest active sprite
-			for (int i1=0; i1<32; i1++)			// 32 sprites 
-			{
-				if (VDP[SAL+(i1<<2)]==0xd0)
-				{
-					highest=i1-1;
-					break;
-				}
-			}
-			if (highest > 0) {
-				z=(z&0xe0)|(rand()%highest);
-			}
-		}
-
-		return((Byte)z);
-	}
-	else
-	{ /* read data */
-		int RealVDP;
-
-		if ((vdpwroteaddress > 0) && (pCurrentCPU == pCPU)) {
-			// todo: need some defines - 0 is top border, not top blanking
-			if ((vdpscanline >= 13) && (vdpscanline < 192+13) && (VDPREG[1]&0x40)) {
-				debug_write("Warning - may be reading VDP too quickly after address write at >%04X!", pCurrentCPU->GetPC());
-				vdpwroteaddress = 0;
-			}
-		}
-
-		vdpaccess=0;		// reset byte flag (confirmed in hardware)
-		RealVDP = GetRealVDP();
-		UpdateHeatVDP(RealVDP);
-
-		if (!rmw) {
-			// Check for breakpoints
-			for (int idx=0; idx<nBreakPoints; idx++) {
-				switch (BreakPoints[idx].Type) {
-					case BREAK_READVDP:
-						if (CheckRange(idx, VDPADD-1)) {
-							TriggerBreakPoint();
-						}
-						break;
-				}
-			}
-		}
-
-		// VDP Address is +1, so we need to check -1
-		if ((g_bCheckUninit) && (vdpprefetchuninited)) {
-			TriggerBreakPoint();
-			// we have to remember if the prefetch was initted, since there are other things it could have
-			char buf[128];
-			sprintf(buf, "Breakpoint - reading uninitialized VDP memory at >%04X (or other prefetch)", (RealVDP-1)&0x3fff);
-			MessageBox(myWnd, buf, "Classic99 Debugger", MB_OK);
-		}
-
-		z=vdpprefetch;
-		vdpprefetch=VDP[RealVDP];
-		vdpprefetchuninited = (VDPMemInited[RealVDP] == 0);
-		increment_vdpadd();
-		return ((Byte)z);
-	}
-}
-
-///////////////////////////////////////////////////////////////
-// Write to VDP chip
-///////////////////////////////////////////////////////////////
-void wvdpbyte(Word x, Byte c)
-{
-	int RealVDP;		
-	
-	if (x<0x8c00 || (x&1)) 
-	{
-		return;							/* not going to write at that block */
-	}
-
-	if (x&0x0002)
-	{	/* write address */
-		// count down access cycles to help detect write address/read vdp overruns (there may be others but we don't think so!)
-		// anyway, we need 8uS or we warn
-		if (max_cpf > 0) {
-			// TODO: this is still wrong. Since the issue is mid-instruction, we need to
-			// count this down either at each phase, or calculate better what it needs
-			// to be before the read. Where this is now, it will subtract the cycles from
-			// this instruction, when it probably shouldn't. The write to the VDP will
-			// happen just 4 (5?) cycles before the end of the instruction (multiplexer)
-#if 0
-			if (hzRate == HZ50) {
-				vdpwroteaddress = (HZ50 * max_cpf) * 8 / 1000000;
-			} else {
-				vdpwroteaddress = (HZ60 * max_cpf) * 8 / 1000000;
-			}
-#endif
-		}
-		if (0 == vdpaccess) {
-			// LSB (confirmed in hardware)
-			VDPADD = (VDPADD & 0xff00) | c;
-			vdpaccess = 1;
-		} else {
-			// MSB - flip-flop is reset and triggers action (confirmed in hardware)
-			VDPADD = (VDPADD & 0x00FF) | (c<<8);
-			vdpaccess = 0;
-
-            // check if the user is probably trying to do DSR filename tracking
-            // This is a TI disk controller side effect and shouldn't be relied
-            // upon - particularly since it involved investigating freed buffers ;)
-            if (((VDPADD == 0x3fe1)||(VDPADD == 0x3fe2)) && (GetSafeCpuWord(0x8356,0) == 0x3fe1)) {
-                debug_write("Software may be trying to track filenames using deleted TI VDP buffers... (>8356)");
-                if (BreakOnDiskCorrupt) TriggerBreakPoint();
-            }
-
-            // check what to do with the write
-			if (VDPADD&0x8000) { 
-				int nReg = (VDPADD&0x3f00)>>8;
-				int nData = VDPADD&0xff;
-
-				if (bF18Enabled) {
-					if ((nReg == 57) && (nData == 0x1c)) {
-						// F18A unlock sequence? Supposed to be twice but for now we'll just take equal
-						// TODO: that's hacky and it's wrong. Fix it. 
-						if (VDPREG[nReg] == nData) {	// but wait -- isn't this already verifying twice? TODO: Double-check procedure
-							bF18AActive = true;
-							debug_write("F18A Enhanced registers unlocked.");
-						} else {
-							VDPREG[nReg] = nData;
-						}
-						return;
-					}
-				} else {
-					// this is hacky ;)
-					bF18AActive = false;
-				}
-				if (bF18AActive) {
-					// check extended registers. 
-					// TODO: the 80 column stuff below should be included in the F18 specific stuff, but it's not right now
-
-					// The F18 has a crapload of registers. But I'm only interested in a few right now, the rest can fall through
-
-					// TODO: a lot of these side effects need to move to wVDPReg
-					// Added by RasmusM
-					if (nReg == 15) {
-						// Status register select
-						//debug_write("F18A status register 0x%02X selected", nData & 0x0f);
-						F18AStatusRegisterNo = nData & 0x0f;
-						return;
-					}
-					if (nReg == 47) {
-						// Palette control
-						bF18ADataPortMode = (nData & 0x80) != 0;
-						bF18AAutoIncPaletteReg = (nData & 0x40) != 0;
-						F18APaletteRegisterNo = nData & 0x3f;
-						F18APaletteRegisterData = -1;
-						if (bF18ADataPortMode) {
-							debug_write("F18A Data port mode on.");
-						}
-						else {
-							debug_write("F18A Data port mode off.");
-						}
-						return;
-					}
-					if (nReg == 49) {
-						// Enhanced color mode
-						F18AECModeSprite = nData & 0x03;
-						F18ASpritePaletteSize = 1 << F18AECModeSprite;	
-						debug_write("F18A Enhanced Color Mode 0x%02X selected for sprites", nData & 0x03);
-						// TODO: read remaining bits: fixed tile enable, 30 rows, ECM tiles, real sprite y coord, sprite linking. 
-						return;
-					}
-					// RasmusM added end
-
-					if (nReg == 54) {
-						// GPU PC MSB
-						VDPREG[nReg] = nData;
-						return;
-					}
-					if (nReg == 55) {
-						// GPU PC LSB -- writes trigger the GPU
-						VDPREG[nReg] = nData;
-						pGPU->SetPC((VDPREG[54]<<8)|VDPREG[55]);
-						debug_write("GPU PC LSB written, starting GPU at >%04X", pGPU->GetPC());
-						pGPU->StopIdle();
-						if (!bInterleaveGPU) {
-							pCurrentCPU = pGPU;
-						}
-						return;
-					}
-					if (nReg == 56) {
-						// GPU control register
-						if (nData & 0x01) {
-							if (pGPU->idling) {
-								// going to run the code anyway to be sure, but only debug on transition
-								debug_write("GPU GO bit written, starting GPU at >%04X", pGPU->GetPC());
-							}
-							pGPU->StopIdle();
-							if (!bInterleaveGPU) {
-								pCurrentCPU = pGPU;
-							}
-						} else {
-							if (!pGPU->idling) {
-								debug_write("GPU GO bit cleared, stopping GPU at >%04X", pGPU->GetPC());
-							}
-							pGPU->StartIdle();
-							pCurrentCPU = pCPU;		// probably redundant
-						}
-						return;
-					}
-				}
-
-				if (bEnable80Columns) {
-					// active only when 80 column is enabled
-					// special hack for RAM... good lord.
-					if ((bEnable128k) && (nReg == 14)) {
-						VDPREG[nReg] = nData&0x07;
-						redraw_needed=REDRAW_LINES;
-						return;
-					}
-
-				}
-
-				if (bF18AActive) {
-					wVDPreg((Byte)(nReg&0x3f),(Byte)(nData));
-				} else {
-					if (nReg&0xf8) {
-						debug_write("Warning: writing >%02X to VDP register >%X ignored (PC=>%04X)", nData, nReg, pCPU->GetPC());
-						return;
-					}
-					// verified correct against real hardware - register is masked to 3 bits
-					wVDPreg((Byte)(nReg&0x07),(Byte)(nData));
-				}
-				redraw_needed=REDRAW_LINES;
-			}
-
-			// And the address remains set even when the target is a register
-			if ((VDPADD&0xC000)==0) {	// prefetch inhibit? Verified on hardware - either bit inhibits.
-				RealVDP = GetRealVDP();
-				vdpprefetch=VDP[RealVDP];
-				vdpprefetchuninited = (VDPMemInited[RealVDP] == 0);
-				increment_vdpadd();
-			} else {
-				VDPADD&=0x3fff;			// writing or register, just mask the bits off
-			}
-		}
-		// verified on hardware - write register does not update the prefetch buffer
-	}
-	else
-	{	/* write data */
-		// TODO: cold reset incompletely resets the F18 state - after TI Scramble runs we see a sprite on the master title page
-		// Added by RasmusM
-		// Write data to F18A palette registers
-		if (bF18AActive && bF18ADataPortMode) {
-			if (F18APaletteRegisterData == -1) {
-				// Read first byte
-				F18APaletteRegisterData = c;
-			}
-			else {
-				// Read second byte
-				{
-					int r=(F18APaletteRegisterData & 0x0f);
-					int g=(c & 0xf0)>>4;
-					int b=(c & 0x0f);
-					F18APalette[F18APaletteRegisterNo] = (r<<20)|(r<<16)|(g<<12)|(g<<8)|(b<<4)|b;	// double up each palette gun, suggestion by Sometimes99er
-					redraw_needed = REDRAW_LINES;
-				}
-				debug_write("F18A palette register >%02X set to >%04X", F18APaletteRegisterNo, F18APalette[F18APaletteRegisterNo]);
-				if (bF18AAutoIncPaletteReg) {
-					F18APaletteRegisterNo++;
-				}
-				// The F18A turns off DPM after each register is written if auto increment is off
-				// or after writing to last register if auto increment in on
-				if ((!bF18AAutoIncPaletteReg) || (F18APaletteRegisterNo == 64)) {
-					bF18ADataPortMode = 0;
-					F18APaletteRegisterNo = 0;
-					debug_write("F18A Data port mode off (auto).");
-				}
-				F18APaletteRegisterData = -1;
-			}
-			return;
-		}
-		// RasmusM added end
-
-		vdpaccess=0;		// reset byte flag (confirmed in hardware)
-
-		RealVDP = GetRealVDP();
-		UpdateHeatVDP(RealVDP);
-		VDP[RealVDP]=c;
-		VDPMemInited[RealVDP]=1;
-
-		// before the breakpoint, check and emit debug if we messed up the disk buffers
-		{
-			int nTop = (staticCPU[0x8370]<<8) | staticCPU[0x8371];
-			if (nTop <= 0x3be3) {
-				// room for at least one disk buffer
-				bool bFlag = false;
-
-				if ((RealVDP == nTop+1) && (c != 0xaa)) {	bFlag = true;	}
-				if ((RealVDP == nTop+2) && (c != 0x3f)) {	bFlag = true;	}
-				if ((RealVDP == nTop+4) && (c != 0x11)) {	bFlag = true;	}
-				if ((RealVDP == nTop+5) && (c > 9))		{	bFlag = true;	}
-
-				if (bFlag) {
-					debug_write("VDP disk buffer header corrupted at PC >%04X", pCurrentCPU->GetPC());
-				}
-			}
-		}
-
-		// check breakpoints against what was written to where - still assume internal address
-		for (int idx=0; idx<nBreakPoints; idx++) {
-			switch (BreakPoints[idx].Type) {
-				case BREAK_EQUALS_VDP:
-					if ((CheckRange(idx, VDPADD)) && ((c&BreakPoints[idx].Mask) == BreakPoints[idx].Data)) {
-						TriggerBreakPoint();
-					}
-					break;
-
-				case BREAK_WRITEVDP:
-					if (CheckRange(idx, VDPADD)) {
-						TriggerBreakPoint();
-					}
-					break;
-			}
-		}
-
-		// verified on hardware
-		vdpprefetch=c;
-		vdpprefetchuninited = true;		// is it? you are reading back what you wrote. Probably not deliberate
-
-		increment_vdpadd();
-		redraw_needed=REDRAW_LINES;
-	}
-}
-
-////////////////////////////////////////////////////////////////
-// Write to VDP Register
-////////////////////////////////////////////////////////////////
-void wVDPreg(Byte r, Byte v)
-{ 
-	int t;
-
-	if (r > 58) {
-		debug_write("Writing VDP register more than 58 (>%02X) ignored...", r);
-		return;
-	}
-
-	VDPREG[r]=v;
-
-	// check breakpoints against what was written to where
-	for (int idx=0; idx<nBreakPoints; idx++) {
-		switch (BreakPoints[idx].Type) {
-			case BREAK_EQUALS_VDPREG:
-				if ((r == BreakPoints[idx].A) && ((v&BreakPoints[idx].Mask) == BreakPoints[idx].Data)) {
-					TriggerBreakPoint();
-				}
-				break;
-		}
-	}
-
-	if (r==7)
-	{	/* color of screen, set color 0 (trans) to match */
-		/* todo: does this save time in drawing the screen? it's dumb */
-		t=v&0xf;
-		if (t) {
-			F18APalette[0]=F18APalette[t];
-		} else {
-			F18APalette[0]=0x000000;	// black
-		}
-		redraw_needed=REDRAW_LINES;
-	}
-
-	if (!bEnable80Columns) {
-		// warn if setting 4k mode - the console ROMs actually do this often! However,
-		// this bit is not honored on the 9938 and later, so is usually set to 0 there
-		if ((r == 1) && ((v&0x80) == 0)) {
-			// ignore if it's a console ROM access - it does this to size VRAM
-			if (pCurrentCPU->GetPC() > 0x2000) {
-				debug_write("WARNING: Setting VDP 4k mode at PC >%04X", pCurrentCPU->GetPC());
-			}
-		}
-	}
-
-	// for the F18A GPU, copy it to RAM
-	VDP[0x6000+r]=v;
-}
-
-////////////////////////////////////////////////////////////////
-// Write a byte to the sound chip
-// Nice notes at http://www.smspower.org/maxim/docs/SN76489.txt
-////////////////////////////////////////////////////////////////
-void wsndbyte(Byte c)
-{
-	unsigned int x, idx;								// temp variable
-	static int oldFreq[3]={0,0,0};						// tone generator frequencies
-
-	if (NULL == lpds) return;
-
-	// 'c' contains the byte currently being written to the sound chip
-	// all functions are 1 or 2 bytes long, as follows					
-	//
-	// BYTE		BIT		PURPOSE											
-	//	1		0		always '1' (latch bit)							
-	//			1-3		Operation:	000 - tone 1 frequency				
-	//								001 - tone 1 volume					
-	//								010 - tone 2 frequency				
-	//								011 - tone 2 volume					
-	//								100 - tone 3 frequency				
-	//								101 - tone 3 volume					
-	//								110 - noise control					
-	//								111 - noise volume					
-	//			4-7		Least sig. frequency bits for tone, or volume	
-	//					setting (0-F), or type of noise.				
-	//					(volume F is off)								
-	//					Noise set:	4 - always 0						
-	//								5 - 0=periodic noise, 1=white noise 
-	//								6-7 - shift rate from table, or 11	
-	//									to get rate from voice 3.		
-	//	2		0-1		Always '0'. This byte only used for frequency	
-	//			2-7		Most sig. frequency bits						
-	//
-	// Commands are instantaneous
-
-	// Latch anytime the high bit is set
-	// This byte still immediately changes the channel
-	if (c&0x80) {
-		latch_byte=c;
-	}
-
-	switch (c&0xf0)										// check command
-	{	
-	case 0x90:											// Voice 1 vol
-	case 0xb0:											// Voice 2 vol
-	case 0xd0:											// Voice 3 vol
-	case 0xf0:											// Noise volume
-		setvol((c&0x60)>>5, c&0x0f);
-		break;
-
-	case 0xe0:
-		x=(c&0x07);										// Noise - get type
-		setfreq(3, c&0x07);
-		break;
-
-//	case 0x80:											// Voice 1 frequency
-//	case 0xa0:											// Voice 2 frequency
-//	case 0xc0:											// Voice 3 frequency
-	default:											// Any other byte
-		int nChan=(latch_byte&0x60)>>5;
-		if (c&0x80) {
-			// latch write - least significant bits of a tone register
-			// (definately not noise, noise was broken out earlier)
-			oldFreq[nChan]&=0xfff0;
-			oldFreq[nChan]|=c&0x0f;
-		} else {
-			// latch clear - data to whatever is latched
-			// TODO: re-verify this on hardware, it doesn't agree with the SMS Power doc
-			// as far as the volume and noise goes!
-			if (latch_byte&0x10) {
-				// volume register
-				setvol(nChan, c&0x0f);
-			} else if (nChan==3) {
-				// noise register
-				setfreq(3, c&0x07);
-			} else {
-				// tone generator - most significant bits
-				oldFreq[nChan]&=0xf;
-				oldFreq[nChan]|=(c&0x3f)<<4;
-			}
-		}
-		setfreq(nChan, oldFreq[nChan]);
-		break;
-	}
-}
-
-//////////////////////////////////////////////////////////////////
-// GROM base 0 (console GROMS) manage all address operations
-//////////////////////////////////////////////////////////////////
-// Read a byte from GROM
-//////////////////////////////////////////////////////////////////
-Byte ReadValidGrom(int nBase, Word x) {
-	Byte z;
-
-	// NOTE: Classic99 does not emulate the 6k GROM behaviour that causes mixed
-	// data in the range between 6k and 8k - because Classic99 assumes all GROMS
-	// are actually 8k devices. It will return whatever was in the ROM data it
-	// loaded (or zeros if no data was loaded there). I don't intend to reproduce
-	// this behaviour (but I can certainly conceive of using it for copy protection,
-	// if only real GROMs could still be manufactured...)
-    // TODO: actually, we can easily incorporate it by generating the extra 2k when we
-    // load a 6k grom... but it would only work if we loaded 6k groms instead of
-    // the combined banks lots of people use. But at least we'd do it.
-
-	// the -1 accounts for the prefetch to get the data we're going to read
-	if ((Word)(GROMBase[0].GRMADD-1) < 0x6000) {
-		// console GROMs always respond
-		nBase=0;
-	}
-
-//	if (nBase > 0) {
-//		debug_write("Read GROM base %d(>%04X), >%04x, >%02x", nBase, x, GROMBase[0].GRMADD, GROMBase[nBase].grmdata);
-//	}
-
-	// Note that UberGROM access time (in the pre-release version) was 15 cycles (14.6), but it
-	// does not apply as long as other GROMs are in the system (and they have to be due to lack
-	// of address counter.) So this is still valid.
-
-	if (x&0x0002)
-	{
-		// address
-		GROMBase[0].grmaccess=2;
-		z=(GROMBase[0].GRMADD&0xff00)>>8;
-		// read is destructive
-		GROMBase[0].GRMADD=(((GROMBase[0].GRMADD&0xff)<<8)|(GROMBase[0].GRMADD&0xff));		
-		// TODO: Is the address incremented anyway? ie: if you keep reading, what do you get?
-
-        // GROM read address always adds about 13 cycles
-		pCurrentCPU->AddCycleCount(13);
-
-		return(z);
-	}
-	else
-	{
-		// data
-		UpdateHeatGROM(GROMBase[0].GRMADD);
-
-        // this saves some debug off for Rich
-        GROMBase[0].LastRead = GROMBase[0].GRMADD;
-        GROMBase[0].LastBase = nBase;
-
-		GROMBase[0].grmaccess=2;
-		z=GROMBase[nBase].grmdata;
-
-		// a test for the Distorter project - special cases - GROM base is always 0 for console GROMs!
-		if (bMpdActive) {
-			z=GetMpdOverride(GROMBase[0].GRMADD - 1, z);
-			// the rest of the MPD works like MESS does, copying data into the GROM array. Less efficient, better for debug though
-		}
-		if ((bUberGROMActive) && ((Word)(GROMBase[0].GRMADD-1) >= 0x6000)) {
-			z=UberGromRead(GROMBase[0].GRMADD-1, nBase);
-		}
-
-		// update all bases prefetch
-		for (int idx=0; idx<PCODEGROMBASE; idx++) {
-			GROMBase[idx].grmdata=GROMBase[idx].GROM[GROMBase[0].GRMADD];
-		}
-
-        // TODO: This is not correct emulation for the gigacart, which ACTUALLY maintains
-        // an 8-bit address latch and a 1 bit select (for GROM >8000)
-        // But it's enough to let me test some theories...
-   		GROMBase[0].GRMADD++;
-
-        // GROM read data always adds about 19 cycles
-		pCurrentCPU->AddCycleCount(19);
-
-		return(z);
-	}
-}
-
-Byte rgrmbyte(Word x, bool rmw)
-{
-	unsigned int z;										// temp variable
-	int nBank;
-
-	if (x>=0x9c00)
-	{
-		return(0);										// write address
-	}
-
-	if (grombanking) {
-		nBank=(x&0x3ff)>>2;								// maximum possible range to >9BFF - not all supported here though
-		if (nBank >= PCODEGROMBASE) {
-			debug_write("Invalid GROM base 0x%04X read", x);
-			return 0;
-		}
-	} else {
-		nBank=0;
-	}
-
-	if (!rmw) {
-		// Check for breakpoints
-		for (int idx=0; idx<nBreakPoints; idx++) {
-			switch (BreakPoints[idx].Type) {
-				case BREAK_READGROM:
-					if (CheckRange(idx, GROMBase[0].GRMADD-1)) {
-						TriggerBreakPoint();
-					}
-					break;
-			}
-		}
-	}
-
-	return ReadValidGrom(nBank, x);
 }
 
 //////////////////////////////////////////////////////////////////
@@ -5261,90 +4116,6 @@ void wgrmbyte(Word x, Byte c)
 	}
 
 	return WriteValidGrom(nBank, x, c);
-}
-
-//////////////////////////////////////////////////////////////////
-// Read a byte from P-Code GROM
-//////////////////////////////////////////////////////////////////
-Byte rpcodebyte(Word x)
-{
-	Byte z;
-
-	if (x>=0x5ffc)
-	{
-		return(0);										// write address
-	}
-
-	// PCODE GROMs are distinct from the rest of the system
-
-//	debug_write("Read PCODE GROM (>%04X), >%04x, >%02x", x, GROMBase[PCODEGROMBASE].GRMADD, GROMBase[PCODEGROMBASE].grmdata);
-
-	if (x&0x0002)
-	{
-		// address
-		GROMBase[PCODEGROMBASE].grmaccess=2;
-		z=(GROMBase[PCODEGROMBASE].GRMADD&0xff00)>>8;
-		// read is destructive
-		GROMBase[PCODEGROMBASE].GRMADD=(((GROMBase[PCODEGROMBASE].GRMADD&0xff)<<8)|(GROMBase[PCODEGROMBASE].GRMADD&0xff));		
-		// TODO: Is the address incremented anyway? ie: if you keep reading, what do you get?
-		return(z);
-	}
-	else
-	{
-		// data
-		UpdateHeatGROM(GROMBase[PCODEGROMBASE].GRMADD);	// todo: maybe a separate P-Code color?
-
-		GROMBase[PCODEGROMBASE].grmaccess=2;
-		z=GROMBase[PCODEGROMBASE].grmdata;
-
-		// update just this prefetch
-		GROMBase[PCODEGROMBASE].grmdata=GROMBase[PCODEGROMBASE].GROM[GROMBase[PCODEGROMBASE].GRMADD];
-		GROMBase[PCODEGROMBASE].GRMADD++;
-		return(z);
-	}
-}
-
-//////////////////////////////////////////////////////////////////
-// Write a byte to P-Code GROM
-//////////////////////////////////////////////////////////////////
-void wpcodebyte(Word x, Byte c)
-{
-	if (x<0x5ffc) 
-	{
-		return;											// read address
-	}
-
-	// PCODE GROMs are distinct from the rest of the system
-//	debug_write("Write PCODE GROM (>%04X), >%04x, >%02x, %d", x, GROMBase[PCODEGROMBASE].GRMADD, c, GROMBase[PCODEGROMBASE].grmaccess);
-
-	if (x&0x0002)
-	{
-		GROMBase[PCODEGROMBASE].GRMADD=(GROMBase[PCODEGROMBASE].GRMADD<<8)|(c);						// write GROM address
-		GROMBase[PCODEGROMBASE].grmaccess--;
-		if (GROMBase[PCODEGROMBASE].grmaccess==0)
-		{ 
-			GROMBase[PCODEGROMBASE].grmaccess=2;										// prefetch emulation
-			
-			// update just this prefetch
-			GROMBase[PCODEGROMBASE].grmdata=GROMBase[PCODEGROMBASE].GROM[GROMBase[PCODEGROMBASE].GRMADD];
-			GROMBase[PCODEGROMBASE].GRMADD++;
-		}
-		// GROM writes do not affect the prefetches, and have the same
-		// side effects as reads (they increment the address and perform a
-		// new prefetch)
-	}
-	else
-	{
-		UpdateHeatGROM(GROMBase[PCODEGROMBASE].GRMADD);		// todo: another color for pCode?
-
-		GROMBase[PCODEGROMBASE].grmaccess=2;
-
-//		debug_write("Writing to PCODE GROM!!");	// not supported!
-
-		// update just this prefetch
-		GROMBase[PCODEGROMBASE].grmdata=GROMBase[PCODEGROMBASE].GROM[GROMBase[PCODEGROMBASE].GRMADD];
-		GROMBase[PCODEGROMBASE].GRMADD++;
-	}
 }
 
 //////////////////////////////////////////////////////////////////
